@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import type { User } from 'firebase/auth';
 import {
   CheckCircle2,
   DatabaseBackup,
@@ -12,24 +13,48 @@ import type {
   AppDatabase,
   InstitutionalConfig,
   StudentRosterEntry,
+  WorkspaceLinks,
 } from '../types.ts';
 import { ConfirmModal } from './ConfirmModal.tsx';
+import { CloudWorkspacePanel } from './CloudWorkspacePanel.tsx';
 import { parseIntegraHtmlPlanilla } from '../utils/integraParser.ts';
 
 interface SettingsViewProps {
+  db: AppDatabase;
   config: InstitutionalConfig;
   rosters: StudentRosterEntry[];
   onUpdateConfig: (next: Partial<InstitutionalConfig>) => Promise<InstitutionalConfig>;
   onImportRoster: (entries: StudentRosterEntry[]) => Promise<void>;
   onRestoreBackup: (backup: AppDatabase) => Promise<void>;
+  authUser: User | null;
+  accessToken: string | null;
+  isLoggingIn: boolean;
+  workspaceLinks: WorkspaceLinks;
+  hasPendingSheetSync: boolean;
+  onGoogleLogin: () => Promise<void>;
+  onGoogleLogout: () => Promise<void>;
+  onUpdateWorkspaceLinks: (next: WorkspaceLinks) => void;
+  onReplaceDatabaseFromSheets: (nextDb: AppDatabase) => Promise<void>;
+  onMarkSheetSynced: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
+  db,
   config,
   rosters,
   onUpdateConfig,
   onImportRoster,
   onRestoreBackup,
+  authUser,
+  accessToken,
+  isLoggingIn,
+  workspaceLinks,
+  hasPendingSheetSync,
+  onGoogleLogin,
+  onGoogleLogout,
+  onUpdateWorkspaceLinks,
+  onReplaceDatabaseFromSheets,
+  onMarkSheetSynced,
 }) => {
   const [form, setForm] = useState<InstitutionalConfig>(config);
   const [newSubject, setNewSubject] = useState('');
@@ -143,16 +168,45 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     return Array.from(map.values());
   }, [rosters]);
 
+  const handleExportBackupJson = () => {
+    const blob = new Blob([JSON.stringify(db, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `respaldo_casd_planes_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   return (
     <div className="space-y-6">
       <div className="rounded-xl border border-slate-200 bg-white px-6 py-4">
         <h2 className="text-lg font-bold text-slate-900">
-          Configuración institucional y copias de seguridad
+          Configuración institucional, nube y publicación
         </h2>
         <p className="text-xs text-slate-500">
-          Administra los datos predeterminados que aparecen automáticamente en cada nuevo documento Word, importa planillas y gestiona respaldos.
+          Conecta Google Sheets y Google Drive como respaldo en la nube, configura los datos institucionales predeterminados e importa planillas.
         </p>
       </div>
+
+      {/* Cloud Backend: Google Sheets, Drive Folder & GitHub Pages Guide */}
+      <CloudWorkspacePanel
+        db={db}
+        user={authUser}
+        accessToken={accessToken}
+        isLoggingIn={isLoggingIn}
+        links={workspaceLinks}
+        hasPendingSheetSync={hasPendingSheetSync}
+        onLogin={onGoogleLogin}
+        onLogout={onGoogleLogout}
+        onUpdateLinks={onUpdateWorkspaceLinks}
+        onReplaceDatabaseFromSheets={onReplaceDatabaseFromSheets}
+        onMarkSynced={onMarkSheetSynced}
+      />
 
       {message && (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900" role="status">
@@ -468,14 +522,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-3 shrink-0">
-            <a
-              href="/api/backup/export"
-              download
+            <button
+              type="button"
+              onClick={handleExportBackupJson}
               className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0"
             >
               <Download className="h-4 w-4 text-[#0D7136]" />
               Exportar copia (.json)
-            </a>
+            </button>
 
             <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0">
               <Upload className="h-4 w-4" />

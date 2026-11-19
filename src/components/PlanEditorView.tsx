@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  CloudUpload,
   Download,
   Eye,
   FilePlus,
@@ -33,6 +34,7 @@ interface PlanEditorViewProps {
   onSavePlan: (planToSave: PlanDraft) => Promise<SupportPlan>;
   onPreview: (plan: SupportPlan) => void;
   onSaveRowToLibrary: (row: AcademicContentRow, topicTitle: string, grade: string, subject: string, year: number) => Promise<void>;
+  onUploadToDrive?: (plan: SupportPlan) => void;
 }
 
 export function createInitialDraft(config: InstitutionalConfig): PlanDraft {
@@ -69,6 +71,7 @@ export const PlanEditorView: React.FC<PlanEditorViewProps> = ({
   onSavePlan,
   onPreview,
   onSaveRowToLibrary,
+  onUploadToDrive,
 }) => {
   const [errors, setErrors] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
@@ -184,6 +187,24 @@ export const PlanEditorView: React.FC<PlanEditorViewProps> = ({
     setErrors(validationErrors);
     if (validationErrors.length > 0) return;
     onPreview(buildPreviewPlan());
+  };
+
+  const handleSaveAndUploadToDrive = async () => {
+    if (!onUploadToDrive) return;
+    const validationErrors = validate();
+    setErrors(validationErrors);
+    if (validationErrors.length > 0) return;
+    setSaving(true);
+    setStatusMessage(null);
+    try {
+      const saved = await onSavePlan(draft);
+      onChangeDraft({ ...draft, editingPlanId: saved.id });
+      onUploadToDrive(saved);
+    } catch (err) {
+      setErrors([err instanceof Error ? err.message : 'No se pudo preparar el archivo para Drive.']);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -559,6 +580,17 @@ export const PlanEditorView: React.FC<PlanEditorViewProps> = ({
             <Eye className="h-4 w-4" />
             Vista previa
           </button>
+          {onUploadToDrive && (
+            <button
+              type="button"
+              onClick={handleSaveAndUploadToDrive}
+              disabled={generating || saving}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-[#095528] transition-colors hover:bg-[#EAF4EE] disabled:opacity-60 whitespace-nowrap shrink-0"
+            >
+              <CloudUpload className="h-4 w-4 text-[#0D7136]" />
+              Subir .docx a Drive
+            </button>
+          )}
           <button
             type="button"
             onClick={handleGenerateAndDownload}

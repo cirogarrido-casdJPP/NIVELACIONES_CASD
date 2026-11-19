@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Download, Printer, X, FileText, Pencil } from 'lucide-react';
+import { CloudUpload, Download, Printer, X, FileText, Pencil } from 'lucide-react';
 import type { SupportPlan } from '../types.ts';
 import {
   INSTITUTIONAL_LOGO_URL,
@@ -12,6 +12,7 @@ interface PlanDocumentPreviewProps {
   footerNote?: string;
   onClose: () => void;
   onEdit?: (plan: SupportPlan) => void;
+  onUploadToDrive?: (plan: SupportPlan) => void;
 }
 
 export const PlanDocumentPreview: React.FC<PlanDocumentPreviewProps> = ({
@@ -19,6 +20,7 @@ export const PlanDocumentPreview: React.FC<PlanDocumentPreviewProps> = ({
   footerNote,
   onClose,
   onEdit,
+  onUploadToDrive,
 }) => {
   const [downloading, setDownloading] = useState(false);
 
@@ -63,7 +65,7 @@ export const PlanDocumentPreview: React.FC<PlanDocumentPreviewProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           {onEdit && (
             <button
               type="button"
@@ -75,6 +77,16 @@ export const PlanDocumentPreview: React.FC<PlanDocumentPreviewProps> = ({
             >
               <Pencil className="h-3.5 w-3.5" />
               Editar plan
+            </button>
+          )}
+          {onUploadToDrive && (
+            <button
+              type="button"
+              onClick={() => onUploadToDrive(plan)}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 transition-colors hover:bg-slate-700 whitespace-nowrap shrink-0"
+            >
+              <CloudUpload className="h-3.5 w-3.5 text-[#86EFAC]" />
+              Subir a Drive
             </button>
           )}
           <button

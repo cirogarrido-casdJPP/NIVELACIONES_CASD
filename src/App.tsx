@@ -1,14 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import type { User } from 'firebase/auth';
 import {
   BookOpen,
+  CloudUpload,
   FilePlus2,
   History,
   LayoutDashboard,
   Menu,
+  RefreshCw,
   Settings,
   Users,
   X,
 } from 'lucide-react';
+import JSZip from 'jszip';
 import type {
   AcademicContentRow,
   AppDatabase,
@@ -18,10 +22,28 @@ import type {
   PlanDraft,
   StudentRosterEntry,
   SupportPlan,
+  WorkspaceLinks,
 } from './types.ts';
 import { INITIAL_DATABASE } from './data/seedData.ts';
 import { api } from './utils/api.ts';
-import { INSTITUTIONAL_LOGO_URL } from './utils/docxGenerator.ts';
+import {
+  INSTITUTIONAL_LOGO_URL,
+  buildPlanFilename,
+  generatePlanDocxBlob,
+  loadInstitutionalLogoBytes,
+  sanitizeFileName,
+} from './utils/docxGenerator.ts';
+import {
+  googleSignIn,
+  initAuth,
+  logout,
+} from './utils/googleAuth.ts';
+import {
+  loadWorkspaceLinks,
+  saveWorkspaceLinks,
+  uploadBlobToDriveFolder,
+  writeDatabaseToSheets,
+} from './utils/googleWorkspaceBackend.ts';
 import { DashboardView } from './components/DashboardView.tsx';
 import { PlanEditorView, createInitialDraft } from './components/PlanEditorView.tsx';
 import { createEmptyAssignedWork } from './components/AssignedWorksEditor.tsx';
@@ -30,6 +52,8 @@ import { LibraryView } from './components/LibraryView.tsx';
 import { HistoryView } from './components/HistoryView.tsx';
 import { SettingsView } from './components/SettingsView.tsx';
 import { PlanDocumentPreview } from './components/PlanDocumentPreview.tsx';
+import { ConfirmModal } from './components/ConfirmModal.tsx';
+import { GoogleSignInButton } from './components/GoogleSignInButton.tsx';
 
 const DRAFT_STORAGE_KEY = 'casd_plan_draft_v1';
 
@@ -48,6 +72,10 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'settings', label: 'Configuración', icon: Settings },
 ];
 
+type PendingDriveUpload =
+  | { kind: 'single'; plan: SupportPlan; fileName: string }
+  | { kind: 'batch_zip'; plans: SupportPlan[]; fileName: string };
+
 export default function App() {
   const [section, setSection] = useState<AppSection>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -55,6 +83,21 @@ export default function App() {
   const [db, setDb] = useState<AppDatabase>(INITIAL_DATABASE);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [workspaceLinks, setWorkspaceLinks] = useState<WorkspaceLinks>(() =>
+    loadWorkspaceLinks()
+  );
+  const [hasPendingSheetSync, setHasPendingSheetSync] = useState(false);
+  const [syncingSheets, setSyncingSheets] = useState(false);
+  const [confirmSheetSyncOpen, setConfirmSheetSyncOpen] = useState(false);
+
+  const [pendingDriveUpload, setPendingDriveUpload] =
+    useState<PendingDriveUpload | null>(null);
+  const [uploadingToDrive, setUploadingToDrive] = useState(false);
+  const [cloudSetupPromptOpen, setCloudSetupPromptOpen] = useState(false);
 
   const [draft, setDraft] = useState<PlanDraft>(() => {
     try {
@@ -83,7 +126,21 @@ export default function App() {
     setToast(msg);
     setTimeout(() => {
       setToast((curr) => (curr === msg ? null : curr));
-    }, 3500);
+    }, 4000);
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setAuthUser(user);
+        setAccessToken(token);
+      },
+      (user) => {
+        setAuthUser(user);
+        setAccessToken(null);
+      }
+    );
+    return unsubscribe;
   }, []);
 
   useEffect(() => {
@@ -94,7 +151,6 @@ export default function App() {
         if (!active) return;
         setDb(remote);
         setDraft((prev) => {
-          // If draft is still pristine, sync institutional defaults from server config
           if (!prev.studentName && !prev.editingPlanId && prev.rows.length <= 1) {
             const firstRow = prev.rows[0];
             const isEmptyRow =
@@ -114,7 +170,7 @@ export default function App() {
         setLoadError(
           err instanceof Error
             ? err.message
-            : 'No se pudo conectar con el almacenamiento del servidor.'
+            : 'No se pudo cargar la base de datos.'
         );
       } finally {
         if (active) setLoading(false);
@@ -148,6 +204,172 @@ export default function App() {
     setMobileMenuOpen(false);
   };
 
+  const handleGoogleLogin = async () => {
+    setIsLoggingIn(true);
+    try {
+      const res = await googleSignIn();
+      if (res) {
+        setAuthUser(res.user);
+        setAccessToken(res.accessToken);
+        showToast(`Conectado como ${res.user.email || res.user.displayName}`);
+      }
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo iniciar sesión con Google.'
+      );
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleGoogleLogout = async () => {
+    await logout();
+    setAuthUser(null);
+    setAccessToken(null);
+    showToast('Sesión de Google cerrada.');
+  };
+
+  const handleUpdateWorkspaceLinks = (next: WorkspaceLinks) => {
+    setWorkspaceLinks(next);
+    saveWorkspaceLinks(next);
+  };
+
+  const handleReplaceDatabaseFromSheets = async (nextDb: AppDatabase) => {
+    const restored = await api.restoreBackup(nextDb);
+    setDb(restored);
+    setHasPendingSheetSync(false);
+    showToast('Base de datos actualizada desde Google Sheets.');
+  };
+
+  const handleConfirmedSheetSync = async () => {
+    if (!accessToken || !workspaceLinks.spreadsheetId) return;
+    setConfirmSheetSyncOpen(false);
+    setSyncingSheets(true);
+    try {
+      const res = await writeDatabaseToSheets(
+        accessToken,
+        workspaceLinks.spreadsheetId,
+        db,
+        workspaceLinks
+      );
+      handleUpdateWorkspaceLinks({
+        ...workspaceLinks,
+        spreadsheetTitle: res.title,
+        lastSyncedAt: res.syncedAt,
+      });
+      setHasPendingSheetSync(false);
+      showToast(`Google Sheets actualizado ("${res.title}").`);
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo actualizar Google Sheets.'
+      );
+    } finally {
+      setSyncingSheets(false);
+    }
+  };
+
+  const markLocalChange = () => {
+    if (workspaceLinks.spreadsheetId) {
+      setHasPendingSheetSync(true);
+    }
+  };
+
+  const handleRequestUploadPlanToDrive = (plan: SupportPlan) => {
+    if (!accessToken || !workspaceLinks.driveFolderId) {
+      setCloudSetupPromptOpen(true);
+      return;
+    }
+    setPendingDriveUpload({
+      kind: 'single',
+      plan,
+      fileName: buildPlanFilename(plan),
+    });
+  };
+
+  const handleRequestUploadBatchZipToDrive = (
+    plans: SupportPlan[],
+    zipLabel: string
+  ) => {
+    if (!accessToken || !workspaceLinks.driveFolderId) {
+      setCloudSetupPromptOpen(true);
+      return;
+    }
+    const safeZip = sanitizeFileName(zipLabel || 'Planes_Apoyo_CASD');
+    setPendingDriveUpload({
+      kind: 'batch_zip',
+      plans,
+      fileName: `${safeZip}.zip`,
+    });
+  };
+
+  const executePendingDriveUpload = async () => {
+    if (!pendingDriveUpload || !accessToken || !workspaceLinks.driveFolderId) {
+      return;
+    }
+    const task = pendingDriveUpload;
+    setPendingDriveUpload(null);
+    setUploadingToDrive(true);
+    try {
+      if (task.kind === 'single') {
+        const blob = await generatePlanDocxBlob(
+          task.plan,
+          db.config.institutionalFooterNote
+        );
+        const uploaded = await uploadBlobToDriveFolder(
+          accessToken,
+          workspaceLinks.driveFolderId,
+          task.fileName,
+          blob,
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        );
+        showToast(
+          `Subido a Drive: "${uploaded.name}" en ${workspaceLinks.driveFolderName || 'tu carpeta'}.`
+        );
+      } else {
+        const zip = new JSZip();
+        const usedNames = new Map<string, number>();
+        const logoBytes = await loadInstitutionalLogoBytes();
+        for (const p of task.plans) {
+          const blob = await generatePlanDocxBlob(
+            p,
+            db.config.institutionalFooterNote,
+            logoBytes
+          );
+          let name = buildPlanFilename(p);
+          const count = usedNames.get(name) || 0;
+          if (count > 0) {
+            name = name.replace(/\.docx$/i, `_${count + 1}.docx`);
+          }
+          usedNames.set(buildPlanFilename(p), count + 1);
+          zip.file(name, blob);
+        }
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const uploaded = await uploadBlobToDriveFolder(
+          accessToken,
+          workspaceLinks.driveFolderId,
+          task.fileName,
+          zipBlob,
+          'application/zip'
+        );
+        showToast(
+          `ZIP subido a Drive: "${uploaded.name}" (${task.plans.length} archivos).`
+        );
+      }
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : 'Error al subir el archivo a Google Drive.'
+      );
+    } finally {
+      setUploadingToDrive(false);
+    }
+  };
+
   const handleSavePlan = async (planDraft: PlanDraft): Promise<SupportPlan> => {
     if (planDraft.editingPlanId) {
       const updated = await api.updatePlan(planDraft.editingPlanId, {
@@ -173,6 +395,7 @@ export default function App() {
         ...prev,
         plans: prev.plans.map((p) => (p.id === updated.id ? updated : p)),
       }));
+      markLocalChange();
       return updated;
     }
 
@@ -199,6 +422,7 @@ export default function App() {
     ]);
     const created = createdList[0];
     setDb((prev) => ({ ...prev, plans: [created, ...prev.plans] }));
+    markLocalChange();
     return created;
   };
 
@@ -207,6 +431,7 @@ export default function App() {
   ): Promise<SupportPlan[]> => {
     const created = await api.createPlans(plansPayload);
     setDb((prev) => ({ ...prev, plans: [...created, ...prev.plans] }));
+    markLocalChange();
     return created;
   };
 
@@ -216,6 +441,7 @@ export default function App() {
       ...prev,
       plans: prev.plans.filter((p) => p.id !== id),
     }));
+    markLocalChange();
     showToast('Plan eliminado del historial.');
   };
 
@@ -257,6 +483,7 @@ export default function App() {
     ]);
     const duplicated = createdList[0];
     setDb((prev) => ({ ...prev, plans: [duplicated, ...prev.plans] }));
+    markLocalChange();
     showToast(`Plan duplicado (${duplicated.code}).`);
   };
 
@@ -271,6 +498,7 @@ export default function App() {
   ): Promise<LibraryItem> => {
     const created = await api.createLibraryItem(item);
     setDb((prev) => ({ ...prev, library: [created, ...prev.library] }));
+    markLocalChange();
     showToast('Contenido guardado en la biblioteca.');
     return created;
   };
@@ -284,6 +512,7 @@ export default function App() {
       ...prev,
       library: prev.library.map((l) => (l.id === id ? updated : l)),
     }));
+    markLocalChange();
     showToast('Contenido actualizado en la biblioteca.');
     return updated;
   };
@@ -294,6 +523,7 @@ export default function App() {
       ...prev,
       library: prev.library.filter((l) => l.id !== id),
     }));
+    markLocalChange();
     showToast('Contenido eliminado de la biblioteca.');
   };
 
@@ -344,22 +574,27 @@ export default function App() {
   ): Promise<InstitutionalConfig> => {
     const updated = await api.updateConfig(next);
     setDb((prev) => ({ ...prev, config: updated }));
+    markLocalChange();
     return updated;
   };
 
   const handleImportRoster = async (entries: StudentRosterEntry[]) => {
     const updatedRoster = await api.importRosters(entries, true);
     setDb((prev) => ({ ...prev, rosters: updatedRoster }));
+    markLocalChange();
   };
 
   const handleRestoreBackup = async (backup: AppDatabase) => {
     const restored = await api.restoreBackup(backup);
     setDb(restored);
+    markLocalChange();
     showToast('Copia de seguridad restaurada.');
   };
 
   const currentNavLabel =
     NAV_ITEMS.find((n) => n.id === section)?.label || 'Panel principal';
+
+  const isGoogleConnected = Boolean(authUser && accessToken);
 
   return (
     <div className="min-h-screen bg-[#F6FAF7] text-slate-900 flex">
@@ -408,13 +643,58 @@ export default function App() {
           })}
         </nav>
 
-        <div className="border-t border-slate-200 bg-slate-50/70 p-4 text-xs text-slate-600 space-y-1">
-          <p className="font-semibold text-slate-900 truncate">
-            {db.config.teacherName}
-          </p>
-          <p className="truncate text-[11px] text-slate-600">
-            {db.config.area} · Año {db.config.academicYear}
-          </p>
+        <div className="border-t border-slate-200 bg-slate-50/70 p-4 text-xs text-slate-600 space-y-2.5">
+          <div>
+            <p className="font-semibold text-slate-900 truncate">
+              {db.config.teacherName}
+            </p>
+            <p className="truncate text-[11px] text-slate-600">
+              {db.config.area} · Año {db.config.academicYear}
+            </p>
+          </div>
+
+          <div className="border-t border-slate-200 pt-2.5">
+            {isGoogleConnected ? (
+              <div className="space-y-1.5">
+                <p className="truncate text-[11px] font-medium text-[#095528]">
+                  Google: {authUser?.email || authUser?.displayName}
+                </p>
+                {workspaceLinks.spreadsheetId ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmSheetSyncOpen(true)}
+                    disabled={syncingSheets}
+                    className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-medium text-slate-800 hover:bg-slate-100 disabled:opacity-60"
+                  >
+                    <RefreshCw className="h-3 w-3 text-[#0D7136]" />
+                    {syncingSheets
+                      ? 'Sincronizando...'
+                      : hasPendingSheetSync
+                      ? 'Actualizar Google Sheets'
+                      : 'Sincronizar Google Sheets'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleNavigate('settings')}
+                    className="text-[11px] font-medium text-[#0D7136] hover:underline"
+                  >
+                    Configurar Hoja y Carpeta →
+                  </button>
+                )}
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleGoogleLogin}
+                disabled={isLoggingIn}
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-medium text-slate-800 hover:bg-slate-100 disabled:opacity-60"
+              >
+                <CloudUpload className="h-3.5 w-3.5 text-[#0D7136]" />
+                {isLoggingIn ? 'Conectando...' : 'Conectar Google Sheets/Drive'}
+              </button>
+            )}
+          </div>
         </div>
       </aside>
 
@@ -512,6 +792,27 @@ export default function App() {
 
         {/* Viewport */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1360px] w-full mx-auto">
+          {hasPendingSheetSync && isGoogleConnected && workspaceLinks.spreadsheetId && (
+            <div className="no-print mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-[#FAF6D8] px-4 py-3 text-xs text-slate-800">
+              <span>
+                Tienes cambios recientes guardados localmente pendientes por actualizar en Google Sheets (
+                <span className="font-semibold">
+                  {workspaceLinks.spreadsheetTitle || workspaceLinks.spreadsheetId}
+                </span>
+                ).
+              </span>
+              <button
+                type="button"
+                onClick={() => setConfirmSheetSyncOpen(true)}
+                disabled={syncingSheets}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#0D7136] px-3 py-1.5 font-semibold text-white hover:bg-[#095528] disabled:opacity-60 whitespace-nowrap shrink-0"
+              >
+                <CloudUpload className="h-3.5 w-3.5" />
+                {syncingSheets ? 'Sincronizando...' : 'Actualizar Google Sheets'}
+              </button>
+            </div>
+          )}
+
           {loadError && (
             <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900">
               Aviso de conexión: {loadError}
@@ -555,6 +856,7 @@ export default function App() {
                   onSavePlan={handleSavePlan}
                   onPreview={setPreviewPlan}
                   onSaveRowToLibrary={handleSaveRowToLibrary}
+                  onUploadToDrive={handleRequestUploadPlanToDrive}
                 />
               )}
 
@@ -568,6 +870,8 @@ export default function App() {
                   onImportRoster={handleImportRoster}
                   onPreview={setPreviewPlan}
                   onSaveRowToLibrary={handleSaveRowToLibrary}
+                  onUploadPlanToDrive={handleRequestUploadPlanToDrive}
+                  onUploadBatchZipToDrive={handleRequestUploadBatchZipToDrive}
                 />
               )}
 
@@ -590,16 +894,29 @@ export default function App() {
                   onEditPlan={handleEditPlan}
                   onDuplicatePlan={handleDuplicatePlan}
                   onDeletePlan={handleDeletePlan}
+                  onUploadPlanToDrive={handleRequestUploadPlanToDrive}
+                  onUploadBatchZipToDrive={handleRequestUploadBatchZipToDrive}
                 />
               )}
 
               {section === 'settings' && (
                 <SettingsView
+                  db={db}
                   config={db.config}
                   rosters={db.rosters}
                   onUpdateConfig={handleUpdateConfig}
                   onImportRoster={handleImportRoster}
                   onRestoreBackup={handleRestoreBackup}
+                  authUser={authUser}
+                  accessToken={accessToken}
+                  isLoggingIn={isLoggingIn}
+                  workspaceLinks={workspaceLinks}
+                  hasPendingSheetSync={hasPendingSheetSync}
+                  onGoogleLogin={handleGoogleLogin}
+                  onGoogleLogout={handleGoogleLogout}
+                  onUpdateWorkspaceLinks={handleUpdateWorkspaceLinks}
+                  onReplaceDatabaseFromSheets={handleReplaceDatabaseFromSheets}
+                  onMarkSheetSynced={() => setHasPendingSheetSync(false)}
                 />
               )}
             </>
@@ -613,15 +930,97 @@ export default function App() {
         footerNote={db.config.institutionalFooterNote}
         onClose={() => setPreviewPlan(null)}
         onEdit={handleEditPlan}
+        onUploadToDrive={handleRequestUploadPlanToDrive}
       />
 
+      {/* Explicit Confirmation Modal for Google Drive Upload */}
+      <ConfirmModal
+        open={Boolean(pendingDriveUpload)}
+        title="Subir documento a carpeta de Google Drive"
+        description={
+          pendingDriveUpload
+            ? `Se generará y subirá el archivo "${pendingDriveUpload.fileName}" a la carpeta de Google Drive "${workspaceLinks.driveFolderName || workspaceLinks.driveFolderId}". ¿Deseas continuar?`
+            : ''
+        }
+        confirmLabel={uploadingToDrive ? 'Subiendo...' : 'Sí, subir a Google Drive'}
+        variant="primary"
+        onConfirm={executePendingDriveUpload}
+        onCancel={() => setPendingDriveUpload(null)}
+      />
+
+      {/* Explicit Confirmation Modal for Google Sheets Sync */}
+      <ConfirmModal
+        open={confirmSheetSyncOpen}
+        title="Actualizar hoja de cálculo en Google Sheets"
+        description={`Se actualizarán las pestañas Configuracion, Planes (${db.plans.length}), Biblioteca (${db.library.length}) y Estudiantes (${db.rosters.length}) en "${workspaceLinks.spreadsheetTitle || workspaceLinks.spreadsheetId}". ¿Deseas continuar?`}
+        confirmLabel="Sí, actualizar Google Sheets"
+        variant="primary"
+        onConfirm={handleConfirmedSheetSync}
+        onCancel={() => setConfirmSheetSyncOpen(false)}
+      />
+
+      {/* Prompt when user clicks Drive upload before connecting Google / Folder */}
+      {cloudSetupPromptOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">
+                  Conecta tu carpeta de Google Drive
+                </h3>
+                <p className="mt-1 text-xs leading-relaxed text-slate-600">
+                  {!isGoogleConnected
+                    ? 'Inicia sesión con tu cuenta de Google y vincula o crea tu carpeta de archivos en Configuración para subir los documentos Word (.docx).'
+                    : 'Aún no has creado o vinculado la carpeta de Google Drive donde se guardarán los archivos. Ve a Configuración para crearla en un clic.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCloudSetupPromptOpen(false)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+              {!isGoogleConnected && (
+                <GoogleSignInButton
+                  onClick={async () => {
+                    await handleGoogleLogin();
+                    setCloudSetupPromptOpen(false);
+                    handleNavigate('settings');
+                  }}
+                  loading={isLoggingIn}
+                  label="Sign in with Google"
+                />
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setCloudSetupPromptOpen(false);
+                  handleNavigate('settings');
+                }}
+                className="rounded-lg bg-[#0D7136] px-4 py-2 text-xs font-semibold text-white hover:bg-[#095528] whitespace-nowrap shrink-0"
+              >
+                Ir a Configuración
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification */}
-      {toast && (
+      {(toast || uploadingToDrive) && (
         <div
           className="no-print fixed bottom-5 right-5 z-50 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2.5 text-xs font-medium text-white shadow-lg"
           role="status"
         >
-          {toast}
+          {uploadingToDrive ? 'Subiendo archivo a Google Drive...' : toast}
         </div>
       )}
     </div>

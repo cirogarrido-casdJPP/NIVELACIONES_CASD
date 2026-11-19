@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  CloudUpload,
   Download,
   Eye,
   FileArchive,
@@ -52,6 +53,8 @@ interface BatchPlansViewProps {
     subject: string,
     year: number
   ) => Promise<void>;
+  onUploadPlanToDrive?: (plan: SupportPlan) => void;
+  onUploadBatchZipToDrive?: (plans: SupportPlan[], zipLabel: string) => void;
 }
 
 export const BatchPlansView: React.FC<BatchPlansViewProps> = ({
@@ -63,6 +66,8 @@ export const BatchPlansView: React.FC<BatchPlansViewProps> = ({
   onImportRoster,
   onPreview,
   onSaveRowToLibrary,
+  onUploadPlanToDrive,
+  onUploadBatchZipToDrive,
 }) => {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -879,17 +884,34 @@ export const BatchPlansView: React.FC<BatchPlansViewProps> = ({
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={handleDownloadZip}
-              disabled={zipping}
-              className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap shrink-0"
-            >
-              <FileArchive className="h-4 w-4" />
-              {zipping
-                ? 'Comprimiendo archivo ZIP...'
-                : `Descargar todos en ZIP (${generatedPlans.length} archivos .docx)`}
-            </button>
+            <div className="flex flex-wrap items-center gap-2.5">
+              {onUploadBatchZipToDrive && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUploadBatchZipToDrive(
+                      generatedPlans,
+                      `Planes_Apoyo_${course}_${subject}_${academicYear}`
+                    )
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-semibold text-[#095528] transition-colors hover:bg-[#EAF4EE] whitespace-nowrap shrink-0"
+                >
+                  <CloudUpload className="h-4 w-4 text-[#0D7136]" />
+                  Subir ZIP a Google Drive
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleDownloadZip}
+                disabled={zipping}
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap shrink-0"
+              >
+                <FileArchive className="h-4 w-4" />
+                {zipping
+                  ? 'Comprimiendo archivo ZIP...'
+                  : `Descargar todos en ZIP (${generatedPlans.length} archivos .docx)`}
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -916,6 +938,16 @@ export const BatchPlansView: React.FC<BatchPlansViewProps> = ({
                   >
                     <Eye className="h-3.5 w-3.5" />
                   </button>
+                  {onUploadPlanToDrive && (
+                    <button
+                      type="button"
+                      onClick={() => onUploadPlanToDrive(plan)}
+                      className="rounded-md border border-slate-200 bg-white p-1.5 text-[#0D7136] hover:bg-[#EAF4EE]"
+                      title="Subir .docx a Google Drive"
+                    >
+                      <CloudUpload className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => handleDownloadOne(plan)}

@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  CloudUpload,
   Copy,
   Download,
   Eye,
@@ -23,6 +24,8 @@ interface HistoryViewProps {
   onEditPlan: (plan: SupportPlan) => void;
   onDuplicatePlan: (plan: SupportPlan) => Promise<void>;
   onDeletePlan: (id: string) => Promise<void>;
+  onUploadPlanToDrive?: (plan: SupportPlan) => void;
+  onUploadBatchZipToDrive?: (plans: SupportPlan[], zipLabel: string) => void;
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({
@@ -32,6 +35,8 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   onEditPlan,
   onDuplicatePlan,
   onDeletePlan,
+  onUploadPlanToDrive,
+  onUploadBatchZipToDrive,
 }) => {
   const [search, setSearch] = useState('');
   const [gradeFilter, setGradeFilter] = useState('ALL');
@@ -139,17 +144,37 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
         </div>
 
         {selectedIds.size > 0 && (
-          <button
-            type="button"
-            onClick={handleDownloadSelectedZip}
-            disabled={zipping}
-            className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap shrink-0"
-          >
-            <FileArchive className="h-4 w-4" />
-            {zipping
-              ? 'Generando ZIP...'
-              : `Descargar ${selectedIds.size} seleccionado(s) en ZIP`}
-          </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {onUploadBatchZipToDrive && (
+              <button
+                type="button"
+                onClick={() => {
+                  const selectedPlans = plans.filter((p) => selectedIds.has(p.id));
+                  if (selectedPlans.length > 0) {
+                    onUploadBatchZipToDrive(
+                      selectedPlans,
+                      `Historial_Planes_CASD_${new Date().toISOString().slice(0, 10)}`
+                    );
+                  }
+                }}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-[#095528] transition-colors hover:bg-[#EAF4EE] whitespace-nowrap shrink-0"
+              >
+                <CloudUpload className="h-4 w-4 text-[#0D7136]" />
+                Subir ZIP a Drive
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleDownloadSelectedZip}
+              disabled={zipping}
+              className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap shrink-0"
+            >
+              <FileArchive className="h-4 w-4" />
+              {zipping
+                ? 'Generando ZIP...'
+                : `Descargar ${selectedIds.size} seleccionado(s) en ZIP`}
+            </button>
+          </div>
         )}
       </div>
 
@@ -341,6 +366,16 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                           <Download className="h-3.5 w-3.5" />
                           {downloadingId === plan.id ? '...' : '.docx'}
                         </button>
+                        {onUploadPlanToDrive && (
+                          <button
+                            type="button"
+                            onClick={() => onUploadPlanToDrive(plan)}
+                            title="Subir Word (.docx) a carpeta de Google Drive"
+                            className="rounded-md p-1.5 text-[#0D7136] hover:bg-[#EAF4EE]"
+                          >
+                            <CloudUpload className="h-4 w-4" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => setPlanToDelete(plan)}

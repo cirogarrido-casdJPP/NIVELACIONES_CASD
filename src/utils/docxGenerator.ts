@@ -19,7 +19,7 @@ import {
 import JSZip from 'jszip';
 import type { SupportPlan } from '../types.ts';
 
-export const INSTITUTIONAL_LOGO_URL = '/assets/aistudio/NuevoLOGOv2_9a8694b5.png';
+export const INSTITUTIONAL_LOGO_URL = `${import.meta.env.BASE_URL}assets/aistudio/NuevoLOGOv2_9a8694b5.png`;
 
 let cachedLogoBytesPromise: Promise<Uint8Array | undefined> | null = null;
 

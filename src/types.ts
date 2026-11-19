@@ -120,3 +120,21 @@ export type AppSection =
   | 'library'
   | 'history'
   | 'settings';
+
+export interface WorkspaceLinks {
+  spreadsheetId: string;
+  spreadsheetTitle?: string;
+  driveFolderId: string;
+  driveFolderName?: string;
+  lastSyncedAt?: string;
+}
+
+export interface DriveFileEntry {
+  id: string;
+  name: string;
+  mimeType: string;
+  size?: string;
+  createdTime?: string;
+  webViewLink?: string;
+}
+
